@@ -35,15 +35,6 @@ rnb
 - Linux/macOS 终端
 - Python + Jupyter（如需运行 Python 代码单元格）
 - xdg-open（Linux 下用于外部打开链接/图片）
-- chafa
-> [!Tip]
-> 这是依赖所需的库，要求版本高于 1.8.0。
-> 可按如下方式安装：
-> ```bash
-> sudo apt install libchafa-dev
-> # 然后可查看版本
-> pkg-config --modversion chafa
-> ```
 
 ## 🚀 快速开始
 ```bash

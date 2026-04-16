@@ -38,15 +38,6 @@ execution workflow, and external resource opening for links and images.
 - Linux/macOS terminal
 - Python + Jupyter (recommended if you run Python code cells)
 - xdg-open (for opening links/images externally on Linux)
-- chafa
-> [!Tip]
-> This is a lib requires by dependency. And requires version higher than 1.8.0.
-> You can install like this:
-> ```bash
-> sudo apt install libchafa-dev
-> # then you can check version
-> pkg-config --modversion chafa
-> ```
 
 ## 🚀 Quick start
 ```bash
