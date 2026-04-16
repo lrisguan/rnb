@@ -1,14 +1,15 @@
 /// rnb
 /// Copyright (C) 2026 lrisguan <lrisguan@outlook.com>
-/// 
+///
 /// This program is released under the terms of the GNU General Public License version 2(GPLv2).
 /// See https://opensource.org/licenses/GPL-2.0 for more information.
-/// 
+///
 /// Project homepage: https://github.com/lrisguan/rnb
 /// Description: A terminal-first Notebook editor and runner written in Rust.
-
 use crate::app::Action;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 
 pub fn event_to_action(event: Event, mode: crate::app::Mode, in_cell_mode: bool) -> Option<Action> {
     match event {
@@ -28,6 +29,12 @@ fn key_event_to_action(
     mode: crate::app::Mode,
     in_cell_mode: bool,
 ) -> Option<Action> {
+    // Many terminals emit both Press and Release for one physical key stroke.
+    // Ignore Release to avoid handling the same key twice.
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+
     if in_cell_mode && mode != crate::app::Mode::Command {
         return handle_in_cell_mode(key, mode);
     }
@@ -94,17 +101,50 @@ fn handle_normal_mode(key: KeyEvent, in_cell_mode: bool) -> Option<Action> {
         }
         KeyCode::Char('j') | KeyCode::Down => Some(Action::MoveCellDown),
         KeyCode::Char('k') | KeyCode::Up => Some(Action::MoveCellUp),
-        KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('o')
+        KeyCode::Char('a')
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                Some(Action::InsertCellAbove)
+            } else {
+                Some(Action::InsertCellBelow)
+            }
+        }
+        KeyCode::Char('o')
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                Some(Action::InsertCellAbove)
+            } else {
+                Some(Action::InsertCellBelow)
+            }
+        }
+        KeyCode::Char('A') | KeyCode::Char('O')
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            Some(Action::InsertCellAbove)
+        }
+        KeyCode::Char('b')
+            if key.modifiers.contains(KeyModifiers::SHIFT)
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            Some(Action::InsertCellBelow)
+        }
+        KeyCode::Char('B')
             if !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT) =>
         {
             Some(Action::InsertCellBelow)
         }
-        KeyCode::Char('B') | KeyCode::Char('O')
+        KeyCode::Char('b')
             if !key.modifiers.contains(KeyModifiers::CONTROL)
                 && !key.modifiers.contains(KeyModifiers::ALT) =>
         {
-            Some(Action::InsertCellAbove)
+            Some(Action::InsertCellBelow)
         }
         KeyCode::Char('m') | KeyCode::Char('M') => Some(Action::SetCurrentCellMarkdown),
         KeyCode::Char('y') | KeyCode::Char('Y') => Some(Action::SetCurrentCellCode),
@@ -115,6 +155,12 @@ fn handle_normal_mode(key: KeyEvent, in_cell_mode: bool) -> Option<Action> {
             Some(Action::ScrollDown)
         }
         KeyCode::Char('D') => Some(Action::DeleteCell),
+        KeyCode::Char('d')
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            Some(Action::DeleteCell)
+        }
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             Some(Action::DeleteCell)
         }

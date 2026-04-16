@@ -26,10 +26,12 @@ use ratatui::{
 };
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol, Resize, StatefulImage};
 use resvg::{tiny_skia, usvg};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const ASCII_IMAGE_WIDTH_DEFAULT: u32 = 56;
 const ASCII_IMAGE_HEIGHT_MAX: u32 = 20;
@@ -84,9 +86,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             state.target_picker_selected,
             visible_rows,
         );
-        let items: Vec<PopupItem> = state
-            .target_picker_items
-            [start..end]
+        let items: Vec<PopupItem> = state.target_picker_items[start..end]
             .iter()
             .map(|item| PopupItem {
                 label: item.label.clone(),
@@ -99,11 +99,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
             state.target_picker_selected.saturating_add(1),
             state.target_picker_items.len()
         );
-        let popup = build_completion_popup(
-            &items,
-            selected_local,
-            &title,
-        );
+        let popup = build_completion_popup(&items, selected_local, &title);
         frame.render_widget(Clear, layout.completion_popup);
         frame.render_widget(popup, layout.completion_popup);
     }
@@ -161,11 +157,12 @@ fn render_kernel_selector_overlay(
         })
         .collect();
 
-    let block = Block::default().title(format!(
-        "Kernel Selector (Enter apply, Esc cancel)  {}/{}",
-        state.kernel_selected.saturating_add(1),
-        state.kernel_items.len()
-    ))
+    let block = Block::default()
+        .title(format!(
+            "Kernel Selector (Enter apply, Esc cancel)  {}/{}",
+            state.kernel_selected.saturating_add(1),
+            state.kernel_items.len()
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
 
@@ -190,7 +187,50 @@ fn render_help_overlay(frame: &mut Frame, area: ratatui::layout::Rect) {
         height: popup_height.min(area.height),
     };
 
-    let items = [
+    let items = help_items();
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(render_help_popup(items), popup_area);
+}
+
+#[derive(Deserialize)]
+struct HelpConfig {
+    items: Vec<HelpConfigItem>,
+}
+
+#[derive(Deserialize)]
+struct HelpConfigItem {
+    key: String,
+    description: String,
+}
+
+fn help_items() -> &'static [HelpItem] {
+    static HELP_ITEMS: OnceLock<Vec<HelpItem>> = OnceLock::new();
+    HELP_ITEMS
+        .get_or_init(|| load_help_items_from_json().unwrap_or_else(default_help_items))
+        .as_slice()
+}
+
+fn load_help_items_from_json() -> Option<Vec<HelpItem>> {
+    let raw = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/help.json"));
+    let parsed: HelpConfig = serde_json::from_str(raw).ok()?;
+    let items = parsed
+        .items
+        .into_iter()
+        .map(|item| HelpItem {
+            key: item.key,
+            description: item.description,
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
+fn default_help_items() -> Vec<HelpItem> {
+    vec![
         HelpItem {
             key: ":h".to_string(),
             description: "show this help".to_string(),
@@ -275,10 +315,7 @@ fn render_help_overlay(frame: &mut Frame, area: ratatui::layout::Rect) {
             key: ":".to_string(),
             description: "enter command mode".to_string(),
         },
-    ];
-
-    frame.render_widget(Clear, popup_area);
-    frame.render_widget(render_help_popup(&items), popup_area);
+    ]
 }
 
 fn cursor_offset_to_line_col(text: &str, offset_chars: usize) -> (usize, usize) {
@@ -296,6 +333,131 @@ fn cursor_offset_to_line_col(text: &str, offset_chars: usize) -> (usize, usize) 
         }
     }
     (line, col)
+}
+
+fn char_display_width(ch: char) -> usize {
+    if ch == '\t' {
+        4
+    } else {
+        UnicodeWidthChar::width(ch).unwrap_or(0)
+    }
+}
+
+fn text_display_width(text: &str) -> usize {
+    if text.contains('\t') {
+        text.chars().map(char_display_width).sum()
+    } else {
+        UnicodeWidthStr::width(text)
+    }
+}
+
+fn wrapped_row_count(line_cells: usize, prefix_cells: usize, width: usize) -> usize {
+    let cells = (prefix_cells + line_cells).max(1);
+    (cells + width - 1) / width
+}
+
+fn source_lines_for_visuals(source: &str) -> Vec<String> {
+    if source.is_empty() {
+        vec![String::new()]
+    } else {
+        source.split('\n').map(|line| line.to_string()).collect()
+    }
+}
+
+fn prefixed_source_height(
+    source_lines: &[String],
+    width: u16,
+    first_prefix_chars: usize,
+    continuation_prefix_chars: usize,
+) -> usize {
+    let width = width.max(1) as usize;
+    let mut total = 0usize;
+
+    for (idx, line) in source_lines.iter().enumerate() {
+        let prefix_chars = if idx == 0 {
+            first_prefix_chars
+        } else {
+            continuation_prefix_chars
+        };
+        total += wrapped_row_count(text_display_width(line), prefix_chars, width);
+    }
+
+    total.max(1)
+}
+
+fn line_number_width(total_lines: usize) -> usize {
+    total_lines.max(1).to_string().len().max(2)
+}
+
+fn line_number_gutter(line_idx: usize, width: usize) -> String {
+    format!("{:>width$} | ", line_idx + 1, width = width)
+}
+
+fn line_number_gutter_chars(width: usize) -> usize {
+    width + 3
+}
+
+fn prefixed_source_cursor_visual_offset(
+    source_lines: &[String],
+    line_idx: usize,
+    col: usize,
+    first_prefix_chars: usize,
+    continuation_prefix_chars: usize,
+    width: u16,
+    scroll_rows: usize,
+) -> Option<(u16, isize)> {
+    if source_lines.is_empty() || width == 0 {
+        return None;
+    }
+
+    let width_usize = width as usize;
+    let safe_line_idx = line_idx.min(source_lines.len().saturating_sub(1));
+    let safe_col = col.min(source_lines[safe_line_idx].chars().count());
+
+    let mut visual_row = 0usize;
+    for (idx, line) in source_lines.iter().enumerate().take(safe_line_idx) {
+        let prefix = if idx == 0 {
+            first_prefix_chars
+        } else {
+            continuation_prefix_chars
+        };
+        visual_row += wrapped_row_count(text_display_width(line), prefix, width_usize);
+    }
+
+    let current_prefix = if safe_line_idx == 0 {
+        first_prefix_chars
+    } else {
+        continuation_prefix_chars
+    };
+    let col_cells: usize = source_lines[safe_line_idx]
+        .chars()
+        .take(safe_col)
+        .map(char_display_width)
+        .sum();
+    let cursor_cells = current_prefix + col_cells;
+    visual_row += cursor_cells / width_usize;
+    let visual_col = (cursor_cells % width_usize) as u16;
+
+    Some((visual_col, visual_row as isize - scroll_rows as isize))
+}
+
+fn set_clamped_cursor(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    cursor_x_in_area: u16,
+    cursor_y_in_area: isize,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let clamped_x = cursor_x_in_area.min(area.width.saturating_sub(1));
+    let max_y = area.height.saturating_sub(1) as isize;
+    let clamped_y = cursor_y_in_area.clamp(0, max_y) as u16;
+    frame.set_cursor_position((
+        area.x.saturating_add(clamped_x),
+        area.y.saturating_add(clamped_y),
+    ));
 }
 
 fn render_status_bar(frame: &mut Frame, state: &AppState, area: ratatui::layout::Rect) {
@@ -339,7 +501,7 @@ fn render_command_line(frame: &mut Frame, state: &AppState, area: ratatui::layou
 
     let cursor_x = area
         .x
-        .saturating_add(1 + state.command_buffer.chars().count() as u16);
+        .saturating_add(1 + text_display_width(&state.command_buffer) as u16);
     frame.set_cursor_position((cursor_x, area.y));
 }
 
@@ -351,7 +513,13 @@ fn render_cells(frame: &mut Frame, state: &AppState, area: ratatui::layout::Rect
 
     for (idx, cell) in state.notebook.cells.iter().enumerate() {
         let is_current = idx == state.current_cell;
-        let cell_height = calculate_cell_height(cell, content_width, is_current, state.mode);
+        let cell_height = calculate_cell_height(
+            cell,
+            content_width,
+            is_current,
+            state.in_cell_mode,
+            state.mode,
+        );
         let cell_with_gap = cell_height.saturating_add(1);
         let cell_start = document_row;
         let cell_end = cell_start.saturating_add(cell_height);
@@ -400,19 +568,60 @@ fn calculate_cell_height(
     cell: &Cell,
     max_width: u16,
     is_current: bool,
+    in_cell_mode: bool,
     mode: crate::app::Mode,
 ) -> usize {
     match cell {
         Cell::Code(code_cell) => {
-            let lines = build_code_cell_lines(
-                &code_cell.source.to_string(),
-                code_cell.execution_count,
-                &code_cell.outputs,
+            let source = sanitize_output_text(&code_cell.source.to_string());
+            let source_lines = source_lines_for_visuals(&source);
+            let prompt = format!(
+                "In [{}]: ",
+                code_cell
+                    .execution_count
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| " ".to_string())
             );
-            wrapped_rendered_lines_height(&lines, max_width).max(1) + 2
+            let prompt_pad = " ".repeat(prompt.chars().count());
+            let line_no_chars = if is_current
+                && in_cell_mode
+                && (mode == crate::app::Mode::Insert || mode == crate::app::Mode::Normal)
+            {
+                line_number_gutter_chars(line_number_width(source_lines.len()))
+            } else {
+                0
+            };
+
+            let source_height = prefixed_source_height(
+                &source_lines,
+                max_width,
+                line_no_chars + prompt.chars().count(),
+                line_no_chars + prompt_pad.chars().count(),
+            );
+
+            let output_height = if code_cell.outputs.is_empty() {
+                0
+            } else {
+                1 + code_cell
+                    .outputs
+                    .iter()
+                    .map(|output| {
+                        let output_lines = output_to_prefixed_lines(output, code_cell.execution_count);
+                        wrapped_rendered_lines_height(&output_lines, max_width)
+                    })
+                    .sum::<usize>()
+            };
+
+            source_height + output_height + 2
         }
         Cell::Markdown(markdown_cell) => {
-            markdown_cell_content_height(&markdown_cell.source, max_width, is_current, mode)
+            markdown_cell_content_height(
+                &markdown_cell.source,
+                max_width,
+                is_current,
+                in_cell_mode,
+                mode,
+            )
         }
     }
 }
@@ -421,11 +630,20 @@ pub(crate) fn markdown_cell_content_height(
     source: &str,
     max_width: u16,
     is_current: bool,
+    in_cell_mode: bool,
     mode: crate::app::Mode,
 ) -> usize {
-    if is_current && mode == crate::app::Mode::Insert {
-        let md_source_text = build_markdown_source_prefixed_text(source);
-        wrapped_text_height(&md_source_text, max_width).max(1) + 2
+    if is_current && in_cell_mode && mode == crate::app::Mode::Insert {
+        let source_lines = source_lines_for_visuals(&sanitize_output_text(source));
+        let prompt = "Md: ";
+        let prompt_pad = " ".repeat(prompt.chars().count());
+        let line_no_chars = line_number_gutter_chars(line_number_width(source_lines.len()));
+        prefixed_source_height(
+            &source_lines,
+            max_width,
+            line_no_chars + prompt.chars().count(),
+            line_no_chars + prompt_pad.chars().count(),
+        ) + 2
     } else {
         let rendered = render_markdown_to_lines(source);
         let content_height = wrapped_rendered_lines_height(&rendered, max_width).max(1);
@@ -445,9 +663,9 @@ fn wrapped_text_height(text: &str, width: u16) -> usize {
         return 1;
     }
 
-    for line in text.lines() {
-        let chars = line.chars().count().max(1);
-        total += (chars + width - 1) / width;
+    for line in text.split('\n') {
+        let cells = text_display_width(line).max(1);
+        total += (cells + width - 1) / width;
     }
 
     total.max(1)
@@ -461,13 +679,13 @@ fn wrapped_rendered_lines_height(lines: &[Line<'_>], width: u16) -> usize {
 
     let mut total = 0usize;
     for line in lines {
-        let chars = line
+        let cells = line
             .spans
             .iter()
-            .map(|span| span.content.chars().count())
+            .map(|span| text_display_width(span.content.as_ref()))
             .sum::<usize>()
             .max(1);
-        total += (chars + width - 1) / width;
+        total += (cells + width - 1) / width;
     }
 
     total.max(1)
@@ -669,7 +887,7 @@ fn sanitize_and_split_lines(text: &str) -> Vec<String> {
     if cleaned.is_empty() {
         vec![String::new()]
     } else {
-        cleaned.lines().map(|line| line.to_string()).collect()
+        cleaned.split('\n').map(|line| line.to_string()).collect()
     }
 }
 
@@ -1272,6 +1490,14 @@ fn render_code_cell(
 ) {
     let source = sanitize_output_text(&cell.source.to_string());
     let source_lines: Vec<String> = sanitize_and_split_lines(&source);
+    let show_in_cell_line_numbers =
+        is_current && in_cell_mode && (mode == crate::app::Mode::Insert || mode == crate::app::Mode::Normal);
+    let line_no_width = line_number_width(source_lines.len());
+    let line_no_chars = if show_in_cell_line_numbers {
+        line_number_gutter_chars(line_no_width)
+    } else {
+        0
+    };
     let prompt = format!(
         "In [{}]: ",
         cell.execution_count
@@ -1284,10 +1510,17 @@ fn render_code_cell(
         .enumerate()
         .map(|(idx, line)| {
             let prefix = if idx == 0 { &prompt } else { &prompt_pad };
-            let mut spans = vec![Span::styled(
+            let mut spans = Vec::new();
+            if show_in_cell_line_numbers {
+                spans.push(Span::styled(
+                    line_number_gutter(idx, line_no_width),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            spans.push(Span::styled(
                 prefix.to_string(),
                 Style::default().fg(Color::Blue),
-            )];
+            ));
             spans.extend(highlight_python_line(line));
             Line::from(spans)
         })
@@ -1339,15 +1572,16 @@ fn render_code_cell(
             let clamped_cursor = cursor_char.min(source.chars().count());
             let (line, col) = cursor_offset_to_line_col(&source, clamped_cursor);
             let line_idx = line.min(source_lines.len().saturating_sub(1));
-            let max_col = source_lines[line_idx].chars().count();
-            let visible_y = line_idx.saturating_sub(content_scroll);
-            let cursor_x = inner
-                .x
-                .saturating_add(prompt.chars().count() as u16)
-                .saturating_add(col.min(max_col) as u16);
-            let cursor_y = inner.y.saturating_add(visible_y as u16);
-            if cursor_y < inner.y + inner.height {
-                frame.set_cursor_position((cursor_x, cursor_y));
+            if let Some((x, y)) = prefixed_source_cursor_visual_offset(
+                &source_lines,
+                line_idx,
+                col,
+                line_no_chars + prompt.chars().count(),
+                line_no_chars + prompt_pad.chars().count(),
+                inner.width,
+                content_scroll,
+            ) {
+                set_clamped_cursor(frame, inner, x, y);
             }
         }
 
@@ -1420,15 +1654,16 @@ fn render_code_cell(
         let clamped_cursor = cursor_char.min(source.chars().count());
         let (line, col) = cursor_offset_to_line_col(&source, clamped_cursor);
         let line_idx = line.min(source_lines.len().saturating_sub(1));
-        let max_col = source_lines[line_idx].chars().count();
-        let visible_y = line_idx.saturating_sub(code_scroll);
-        let cursor_x = code_area
-            .x
-            .saturating_add(prompt.chars().count() as u16)
-            .saturating_add(col.min(max_col) as u16);
-        let cursor_y = code_area.y.saturating_add(visible_y as u16);
-        if cursor_y < code_area.y + code_area.height {
-            frame.set_cursor_position((cursor_x, cursor_y));
+        if let Some((x, y)) = prefixed_source_cursor_visual_offset(
+            &source_lines,
+            line_idx,
+            col,
+            line_no_chars + prompt.chars().count(),
+            line_no_chars + prompt_pad.chars().count(),
+            code_area.width,
+            code_scroll,
+        ) {
+            set_clamped_cursor(frame, code_area, x, y);
         }
     }
 }
@@ -1457,6 +1692,8 @@ fn render_markdown_cell(
         {
             let source = sanitize_output_text(&cell.source);
             let source_lines = sanitize_and_split_lines(&source);
+            let line_no_width = line_number_width(source_lines.len());
+            let line_no_chars = line_number_gutter_chars(line_no_width);
             let prompt = "Md: ";
             let prompt_pad = " ".repeat(prompt.chars().count());
             let raw_lines: Vec<Line> = source_lines
@@ -1465,6 +1702,10 @@ fn render_markdown_cell(
                 .map(|(idx, line)| {
                     let prefix = if idx == 0 { prompt } else { &prompt_pad };
                     Line::from(vec![
+                        Span::styled(
+                            line_number_gutter(idx, line_no_width),
+                            Style::default().fg(Color::DarkGray),
+                        ),
                         Span::styled(prefix.to_string(), Style::default().fg(Color::Blue)),
                         Span::styled((*line).to_string(), Style::default().fg(Color::Reset)),
                     ])
@@ -1481,15 +1722,16 @@ fn render_markdown_cell(
             let clamped_cursor = cursor_char.min(source.chars().count());
             let (line, col) = cursor_offset_to_line_col(&source, clamped_cursor);
             let line_idx = line.min(source_lines.len().saturating_sub(1));
-            let max_col = source_lines[line_idx].chars().count();
-            let visible_y = line_idx.saturating_sub(base_scroll);
-            let cursor_x = area
-                .x
-                .saturating_add(prompt.chars().count() as u16)
-                .saturating_add(col.min(max_col) as u16);
-            let cursor_y = area.y.saturating_add(visible_y as u16);
-            if cursor_y < area.y + area.height {
-                frame.set_cursor_position((cursor_x, cursor_y));
+            if let Some((x, y)) = prefixed_source_cursor_visual_offset(
+                &source_lines,
+                line_idx,
+                col,
+                line_no_chars + prompt.chars().count(),
+                line_no_chars + prompt_pad.chars().count(),
+                area.width,
+                base_scroll,
+            ) {
+                set_clamped_cursor(frame, area, x, y);
             }
             return;
         }
@@ -1515,6 +1757,8 @@ fn render_markdown_cell(
 
         let source = sanitize_output_text(&cell.source);
         let source_lines = sanitize_and_split_lines(&source);
+        let line_no_width = line_number_width(source_lines.len());
+        let line_no_chars = line_number_gutter_chars(line_no_width);
 
         let prompt = "Md: ";
         let prompt_pad = " ".repeat(prompt.chars().count());
@@ -1524,6 +1768,10 @@ fn render_markdown_cell(
             .map(|(idx, line)| {
                 let prefix = if idx == 0 { prompt } else { &prompt_pad };
                 Line::from(vec![
+                    Span::styled(
+                        line_number_gutter(idx, line_no_width),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                     Span::styled(prefix.to_string(), Style::default().fg(Color::Blue)),
                     Span::styled((*line).to_string(), Style::default().fg(Color::Reset)),
                 ])
@@ -1545,15 +1793,16 @@ fn render_markdown_cell(
         let clamped_cursor = cursor_char.min(source.chars().count());
         let (line, col) = cursor_offset_to_line_col(&source, clamped_cursor);
         let line_idx = line.min(source_lines.len().saturating_sub(1));
-        let max_col = source_lines[line_idx].chars().count();
-        let visible_y = line_idx.saturating_sub(normal_scroll);
-        let cursor_x = inner
-            .x
-            .saturating_add(prompt.chars().count() as u16)
-            .saturating_add(col.min(max_col) as u16);
-        let cursor_y = inner.y.saturating_add(visible_y as u16);
-        if cursor_y < inner.y + inner.height {
-            frame.set_cursor_position((cursor_x, cursor_y));
+        if let Some((x, y)) = prefixed_source_cursor_visual_offset(
+            &source_lines,
+            line_idx,
+            col,
+            line_no_chars + prompt.chars().count(),
+            line_no_chars + prompt_pad.chars().count(),
+            inner.width,
+            normal_scroll,
+        ) {
+            set_clamped_cursor(frame, inner, x, y);
         }
         return;
     }
@@ -1590,6 +1839,8 @@ fn render_markdown_cell(
 
         let source = sanitize_output_text(&cell.source);
         let source_lines = sanitize_and_split_lines(&source);
+        let line_no_width = line_number_width(source_lines.len());
+        let line_no_chars = line_number_gutter_chars(line_no_width);
 
         let prompt = "Md: ";
         let prompt_pad = " ".repeat(prompt.chars().count());
@@ -1599,6 +1850,10 @@ fn render_markdown_cell(
             .map(|(idx, line)| {
                 let prefix = if idx == 0 { prompt } else { &prompt_pad };
                 Line::from(vec![
+                    Span::styled(
+                        line_number_gutter(idx, line_no_width),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                     Span::styled(prefix.to_string(), Style::default().fg(Color::Blue)),
                     Span::styled((*line).to_string(), Style::default().fg(Color::Reset)),
                 ])
@@ -1618,15 +1873,16 @@ fn render_markdown_cell(
         let clamped_cursor = cursor_char.min(source.chars().count());
         let (line, col) = cursor_offset_to_line_col(&source, clamped_cursor);
         let line_idx = line.min(source_lines.len().saturating_sub(1));
-        let max_col = source_lines[line_idx].chars().count();
-        let visible_y = line_idx.saturating_sub(insert_scroll);
-        let cursor_x = inner
-            .x
-            .saturating_add(prompt.chars().count() as u16)
-            .saturating_add(col.min(max_col) as u16);
-        let cursor_y = inner.y.saturating_add(visible_y as u16);
-        if cursor_y < inner.y + inner.height {
-            frame.set_cursor_position((cursor_x, cursor_y));
+        if let Some((x, y)) = prefixed_source_cursor_visual_offset(
+            &source_lines,
+            line_idx,
+            col,
+            line_no_chars + prompt.chars().count(),
+            line_no_chars + prompt_pad.chars().count(),
+            inner.width,
+            insert_scroll,
+        ) {
+            set_clamped_cursor(frame, inner, x, y);
         }
         return;
     }
@@ -2387,7 +2643,9 @@ fn render_table_row(
 }
 
 fn cell_plain_text_width(cell: &[Span<'static>]) -> usize {
-    cell.iter().map(|span| span.content.chars().count()).sum()
+    cell.iter()
+        .map(|span| text_display_width(span.content.as_ref()))
+        .sum()
 }
 
 fn extract_quoted_or_unquoted_attr(tag_content: &str, attr: &str) -> Option<String> {

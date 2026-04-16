@@ -10,6 +10,7 @@ use crate::app::{Action, AppState};
 use crate::editor::Direction;
 use crate::notebook::{Cell, CodeCell, MarkdownCell};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 fn offset_to_line_col(text: &str, offset_chars: usize) -> (usize, usize) {
     let mut line = 0usize;
@@ -29,31 +30,71 @@ fn offset_to_line_col(text: &str, offset_chars: usize) -> (usize, usize) {
 }
 
 fn line_col_to_offset(text: &str, target_line: usize, target_col: usize) -> usize {
-    let mut line = 0usize;
-    let mut col = 0usize;
-    let mut offset = 0usize;
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return 0;
+    }
 
-    for ch in text.chars() {
-        if line == target_line && col >= target_col {
-            break;
+    // Find the start offset of target_line. If the line does not exist, clamp to EOF.
+    let mut line = 0usize;
+    let mut line_start = 0usize;
+    while line < target_line {
+        if line_start >= chars.len() {
+            return chars.len();
         }
-        offset += 1;
-        if ch == '\n' {
-            line += 1;
-            col = 0;
-            if line > target_line {
-                break;
+
+        match chars[line_start..].iter().position(|ch| *ch == '\n') {
+            Some(rel) => {
+                line_start += rel + 1;
+                line += 1;
             }
-        } else {
-            col += 1;
+            None => {
+                return chars.len();
+            }
         }
     }
 
-    offset
+    // Clamp target column inside this line (including empty lines).
+    let line_end = chars[line_start..]
+        .iter()
+        .position(|ch| *ch == '\n')
+        .map(|rel| line_start + rel)
+        .unwrap_or(chars.len());
+    let line_len = line_end.saturating_sub(line_start);
+    line_start + target_col.min(line_len)
 }
 
 fn total_lines(text: &str) -> usize {
     text.chars().filter(|c| *c == '\n').count() + 1
+}
+
+fn char_display_width(ch: char) -> usize {
+    if ch == '\t' {
+        4
+    } else {
+        UnicodeWidthChar::width(ch).unwrap_or(0)
+    }
+}
+
+fn text_display_width(text: &str) -> usize {
+    if text.contains('\t') {
+        text.chars().map(char_display_width).sum()
+    } else {
+        UnicodeWidthStr::width(text)
+    }
+}
+
+fn wrapped_row_count(line_cells: usize, prefix_cells: usize, width: usize) -> usize {
+    let cells = (prefix_cells + line_cells).max(1);
+    (cells + width - 1) / width
+}
+
+fn line_number_width(total_lines: usize) -> usize {
+    total_lines.max(1).to_string().len().max(2)
+}
+
+fn line_number_gutter_chars(width: usize) -> usize {
+    width + 3
 }
 
 fn wrapped_line_height(text: &str, width: usize) -> usize {
@@ -63,9 +104,9 @@ fn wrapped_line_height(text: &str, width: usize) -> usize {
     }
 
     let mut total = 0usize;
-    for line in text.lines() {
-        let chars = line.chars().count().max(1);
-        total += (chars + width - 1) / width;
+    for line in text.split('\n') {
+        let cells = text_display_width(line).max(1);
+        total += (cells + width - 1) / width;
     }
     total.max(1)
 }
@@ -229,6 +270,11 @@ fn cell_visual_rows(state: &AppState, idx: usize) -> usize {
     let base = match state.notebook.get_cell(idx) {
         Some(Cell::Code(code)) => {
             let source_text = code.source.to_string();
+            let show_in_cell_line_numbers =
+                is_current
+                    && state.in_cell_mode
+                    && (state.mode == crate::app::Mode::Insert
+                        || state.mode == crate::app::Mode::Normal);
             let prompt = format!(
                 "In [{}]: ",
                 code.execution_count
@@ -242,33 +288,37 @@ fn cell_visual_rows(state: &AppState, idx: usize) -> usize {
                 source_text.split('\n').collect()
             };
 
-            let mut rendered = String::new();
+            let line_no_chars = if show_in_cell_line_numbers {
+                line_number_gutter_chars(line_number_width(source_lines.len()))
+            } else {
+                0
+            };
+
+            let mut source_rows = 0usize;
             for (line_idx, line) in source_lines.iter().enumerate() {
-                if line_idx > 0 {
-                    rendered.push('\n');
-                }
-                if line_idx == 0 {
-                    rendered.push_str(&prompt);
+                let prefix_chars = if line_idx == 0 {
+                    line_no_chars + prompt.chars().count()
                 } else {
-                    rendered.push_str(&prompt_pad);
-                }
-                rendered.push_str(line);
+                    line_no_chars + prompt_pad.chars().count()
+                };
+                source_rows += wrapped_row_count(text_display_width(line), prefix_chars, width);
             }
 
+            let mut output_rows = 0usize;
             if !code.outputs.is_empty() {
-                rendered.push('\n');
+                output_rows += 1;
             }
             for output in &code.outputs {
-                rendered.push_str(&output_text(output));
-                rendered.push('\n');
+                output_rows += wrapped_line_height(&output_text(output), width);
             }
 
-            wrapped_line_height(&rendered, width).max(1) + 2
+            source_rows.max(1) + output_rows + 2
         }
         Some(Cell::Markdown(markdown)) => crate::ui::render::markdown_cell_content_height(
             &markdown.source,
             width as u16,
             is_current,
+            state.in_cell_mode,
             state.mode,
         ),
         None => 1,
@@ -330,6 +380,116 @@ fn current_cell_text(state: &AppState) -> Option<String> {
     })
 }
 
+fn ensure_in_cell_cursor_visible(state: &mut AppState) {
+    if !state.in_cell_mode || state.mode == crate::app::Mode::Command {
+        return;
+    }
+
+    let Some(text) = current_cell_text(state) else {
+        return;
+    };
+
+    let cursor = state.cursor_char.min(text.chars().count());
+    let (line, col) = offset_to_line_col(&text, cursor);
+    let width = state.viewport_width.saturating_sub(4).max(20) as usize;
+
+    // Cell visual rows include the top border; content starts one row below it.
+    let source_visual_row = match state.current_cell() {
+        Some(Cell::Code(code)) => {
+            let source_lines: Vec<&str> = if text.is_empty() {
+                vec![""]
+            } else {
+                text.split('\n').collect()
+            };
+            let safe_line = line.min(source_lines.len().saturating_sub(1));
+            let safe_col = col.min(source_lines[safe_line].chars().count());
+            let prompt = format!(
+                "In [{}]: ",
+                code.execution_count
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| " ".to_string())
+            );
+            let prompt_pad = " ".repeat(prompt.chars().count());
+            let line_no_chars = line_number_gutter_chars(line_number_width(source_lines.len()));
+
+            let mut row = 0usize;
+            for (idx, line_text) in source_lines.iter().enumerate().take(safe_line) {
+                let prefix_chars = if idx == 0 {
+                    line_no_chars + prompt.chars().count()
+                } else {
+                    line_no_chars + prompt_pad.chars().count()
+                };
+                row += wrapped_row_count(text_display_width(line_text), prefix_chars, width);
+            }
+
+            let current_prefix = if safe_line == 0 {
+                line_no_chars + prompt.chars().count()
+            } else {
+                line_no_chars + prompt_pad.chars().count()
+            };
+            let col_cells: usize = source_lines[safe_line]
+                .chars()
+                .take(safe_col)
+                .map(char_display_width)
+                .sum();
+            row + (current_prefix + col_cells) / width
+        }
+        Some(Cell::Markdown(_)) => {
+            let source_lines: Vec<&str> = if text.is_empty() {
+                vec![""]
+            } else {
+                text.split('\n').collect()
+            };
+            let safe_line = line.min(source_lines.len().saturating_sub(1));
+            let safe_col = col.min(source_lines[safe_line].chars().count());
+            let prompt = "Md: ";
+            let prompt_pad = " ".repeat(prompt.chars().count());
+            let line_no_chars = line_number_gutter_chars(line_number_width(source_lines.len()));
+
+            let mut row = 0usize;
+            for (idx, line_text) in source_lines.iter().enumerate().take(safe_line) {
+                let prefix_chars = if idx == 0 {
+                    line_no_chars + prompt.chars().count()
+                } else {
+                    line_no_chars + prompt_pad.chars().count()
+                };
+                row += wrapped_row_count(text_display_width(line_text), prefix_chars, width);
+            }
+
+            let current_prefix = if safe_line == 0 {
+                line_no_chars + prompt.chars().count()
+            } else {
+                line_no_chars + prompt_pad.chars().count()
+            };
+            let col_cells: usize = source_lines[safe_line]
+                .chars()
+                .take(safe_col)
+                .map(char_display_width)
+                .sum();
+            row + (current_prefix + col_cells) / width
+        }
+        None => 0,
+    };
+
+    let cursor_row = cell_start_row(state, state.current_cell)
+        .saturating_add(1)
+        .saturating_add(source_visual_row);
+
+    let visible = viewport_visible_rows(state).max(1);
+    // Keep two safety rows at the bottom to avoid cursor clamping on viewport edge.
+    let usable_visible = visible.saturating_sub(2).max(1);
+    let view_top = state.scroll_offset;
+    let view_bottom = view_top.saturating_add(usable_visible.saturating_sub(1));
+
+    if cursor_row < view_top {
+        state.scroll_offset = cursor_row;
+    } else if cursor_row >= view_bottom {
+        state.scroll_offset = cursor_row.saturating_sub(usable_visible.saturating_sub(1));
+    }
+
+    clamp_scroll_offset(state);
+}
+
 fn set_current_cell_text(state: &mut AppState, text: &str) {
     if let Some(cell) = state.current_cell_mut() {
         match cell {
@@ -366,6 +526,28 @@ fn first_non_ws_offset(text: &str, start: usize, end: usize) -> usize {
     start
 }
 
+fn delete_current_line(text: &str, cursor: usize) -> (String, usize) {
+    let (_, start, end) = current_line_bounds(text, cursor);
+    let mut chars: Vec<char> = text.chars().collect();
+
+    let remove_end = if end < chars.len() && chars[end] == '\n' {
+        end + 1
+    } else {
+        end
+    };
+
+    if start < remove_end {
+        chars.drain(start..remove_end);
+    }
+
+    if chars.is_empty() {
+        return (String::new(), 0);
+    }
+
+    let new_cursor = start.min(chars.len().saturating_sub(1));
+    (chars.into_iter().collect(), new_cursor)
+}
+
 fn apply_in_cell_key(state: &mut AppState, key_event: KeyEvent) {
     if !(state.in_cell_mode && state.mode != crate::app::Mode::Command) {
         return;
@@ -382,6 +564,7 @@ fn apply_in_cell_key(state: &mut AppState, key_event: KeyEvent) {
             KeyCode::Esc => {
                 state.mode = crate::app::Mode::Normal;
                 state.vim_pending_g = false;
+                state.vim_pending_d = false;
             }
             KeyCode::Left => {
                 state.cursor_char = state.cursor_char.saturating_sub(1);
@@ -450,38 +633,45 @@ fn apply_in_cell_key(state: &mut AppState, key_event: KeyEvent) {
             KeyCode::Enter => {
                 let (_, _, end) = current_line_bounds(&text, state.cursor_char);
                 let mut chars: Vec<char> = text.chars().collect();
-                let insert_pos = if end < chars.len() { end + 1 } else { end };
+                let insert_pos = end;
                 chars.insert(insert_pos, '\n');
                 text = chars.into_iter().collect();
                 set_current_cell_text(state, &text);
                 state.cursor_char = insert_pos + 1;
                 state.mode = crate::app::Mode::Insert;
                 state.vim_pending_g = false;
+                state.vim_pending_d = false;
             }
             KeyCode::Char('g') => {
                 if key_event.modifiers.contains(KeyModifiers::SHIFT) {
                     let last_line = total_lines(&text).saturating_sub(1);
                     state.cursor_char = line_col_to_offset(&text, last_line, 0);
                     state.vim_pending_g = false;
+                    state.vim_pending_d = false;
                 } else if state.vim_pending_g {
                     state.cursor_char = 0;
                     state.vim_pending_g = false;
+                    state.vim_pending_d = false;
                 } else {
                     state.vim_pending_g = true;
+                    state.vim_pending_d = false;
                 }
             }
             KeyCode::Char('G') => {
                 let last_line = total_lines(&text).saturating_sub(1);
                 state.cursor_char = line_col_to_offset(&text, last_line, 0);
                 state.vim_pending_g = false;
+                state.vim_pending_d = false;
             }
             KeyCode::Char('h') | KeyCode::Left => {
                 state.cursor_char = state.cursor_char.saturating_sub(1);
                 state.vim_pending_g = false;
+                state.vim_pending_d = false;
             }
             KeyCode::Char('l') | KeyCode::Right => {
                 state.cursor_char = (state.cursor_char + 1).min(text.chars().count());
                 state.vim_pending_g = false;
+                state.vim_pending_d = false;
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 let (line, col) = offset_to_line_col(&text, state.cursor_char);
@@ -489,6 +679,7 @@ fn apply_in_cell_key(state: &mut AppState, key_event: KeyEvent) {
                     state.cursor_char = line_col_to_offset(&text, line - 1, col);
                 }
                 state.vim_pending_g = false;
+                state.vim_pending_d = false;
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 let (line, col) = offset_to_line_col(&text, state.cursor_char);
@@ -497,20 +688,23 @@ fn apply_in_cell_key(state: &mut AppState, key_event: KeyEvent) {
                     state.cursor_char = line_col_to_offset(&text, line + 1, col);
                 }
                 state.vim_pending_g = false;
+                state.vim_pending_d = false;
             }
             KeyCode::Char('i') => {
                 if key_event.modifiers.contains(KeyModifiers::SHIFT) {
-                    let (_, start, end) = current_line_bounds(&text, state.cursor_char);
-                    state.cursor_char = first_non_ws_offset(&text, start, end);
+                    let (_, start, _) = current_line_bounds(&text, state.cursor_char);
+                    state.cursor_char = start;
                 }
                 state.mode = crate::app::Mode::Insert;
                 state.vim_pending_g = false;
+                state.vim_pending_d = false;
             }
             KeyCode::Char('I') => {
-                let (_, start, end) = current_line_bounds(&text, state.cursor_char);
-                state.cursor_char = first_non_ws_offset(&text, start, end);
+                let (_, start, _) = current_line_bounds(&text, state.cursor_char);
+                state.cursor_char = start;
                 state.mode = crate::app::Mode::Insert;
                 state.vim_pending_g = false;
+                state.vim_pending_d = false;
             }
             KeyCode::Char('a') => {
                 if key_event.modifiers.contains(KeyModifiers::SHIFT) {
@@ -521,12 +715,14 @@ fn apply_in_cell_key(state: &mut AppState, key_event: KeyEvent) {
                 }
                 state.mode = crate::app::Mode::Insert;
                 state.vim_pending_g = false;
+                state.vim_pending_d = false;
             }
             KeyCode::Char('A') => {
                 let (_, _, end) = current_line_bounds(&text, state.cursor_char);
                 state.cursor_char = end;
                 state.mode = crate::app::Mode::Insert;
                 state.vim_pending_g = false;
+                state.vim_pending_d = false;
             }
             KeyCode::Char('o') => {
                 if key_event.modifiers.contains(KeyModifiers::SHIFT) {
@@ -547,6 +743,7 @@ fn apply_in_cell_key(state: &mut AppState, key_event: KeyEvent) {
                 }
                 state.mode = crate::app::Mode::Insert;
                 state.vim_pending_g = false;
+                state.vim_pending_d = false;
             }
             KeyCode::Char('O') => {
                 let (_, start, _) = current_line_bounds(&text, state.cursor_char);
@@ -557,18 +754,66 @@ fn apply_in_cell_key(state: &mut AppState, key_event: KeyEvent) {
                 state.cursor_char = start;
                 state.mode = crate::app::Mode::Insert;
                 state.vim_pending_g = false;
+                state.vim_pending_d = false;
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                if state.vim_pending_d {
+                    let (new_text, new_cursor) = delete_current_line(&text, state.cursor_char);
+                    set_current_cell_text(state, &new_text);
+                    state.cursor_char = new_cursor;
+                    state.vim_pending_d = false;
+                } else {
+                    state.vim_pending_d = true;
+                }
+                state.vim_pending_g = false;
+            }
+            KeyCode::Char('^') | KeyCode::Char('6')
+                if key_event.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                let (_, start, end) = current_line_bounds(&text, state.cursor_char);
+                state.cursor_char = first_non_ws_offset(&text, start, end);
+                state.vim_pending_g = false;
+                state.vim_pending_d = false;
+            }
+            KeyCode::Char('$') | KeyCode::Char('4')
+                if key_event.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
+                let (_, _, end) = current_line_bounds(&text, state.cursor_char);
+                state.cursor_char = end;
+                state.vim_pending_g = false;
+                state.vim_pending_d = false;
+            }
+            KeyCode::Char('0') => {
+                let (_, start, _) = current_line_bounds(&text, state.cursor_char);
+                state.cursor_char = start;
+                state.vim_pending_g = false;
+                state.vim_pending_d = false;
+            }
+            KeyCode::Char('x') => {
+                let mut chars: Vec<char> = text.chars().collect();
+                if state.cursor_char < chars.len() {
+                    chars.remove(state.cursor_char);
+                    text = chars.into_iter().collect();
+                    set_current_cell_text(state, &text);
+                    state.cursor_char = state.cursor_char.min(text.chars().count());
+                }
+                state.vim_pending_g = false;
+                state.vim_pending_d = false;
             }
             KeyCode::Esc => {
                 state.vim_pending_g = false;
+                state.vim_pending_d = false;
             }
             _ => {
                 state.vim_pending_g = false;
+                state.vim_pending_d = false;
             }
         },
         crate::app::Mode::Command => {}
     }
 
     state.clamp_cursor();
+    ensure_in_cell_cursor_visible(state);
 }
 
 pub fn reduce(state: &mut AppState, action: Action) {
@@ -679,6 +924,7 @@ pub fn reduce(state: &mut AppState, action: Action) {
                     }
                 }
                 state.clamp_cursor();
+                ensure_in_cell_cursor_visible(state);
             }
         }
 
@@ -686,14 +932,17 @@ pub fn reduce(state: &mut AppState, action: Action) {
             state.in_cell_mode = true;
             state.mode = crate::app::Mode::Normal;
             state.vim_pending_g = false;
+            state.vim_pending_d = false;
             state.show_completion = false;
             state.clamp_cursor();
+            ensure_in_cell_cursor_visible(state);
         }
 
         Action::LeaveCell => {
             state.in_cell_mode = false;
             state.mode = crate::app::Mode::Normal;
             state.vim_pending_g = false;
+            state.vim_pending_d = false;
             state.show_completion = false;
         }
 
@@ -793,6 +1042,7 @@ pub fn reduce(state: &mut AppState, action: Action) {
             state.mode = mode;
             if mode != crate::app::Mode::Normal {
                 state.vim_pending_g = false;
+                state.vim_pending_d = false;
             }
             state.show_completion = false;
         }
