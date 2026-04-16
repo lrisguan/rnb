@@ -10,8 +10,7 @@ keywords = ["jupyter", "notebook", "cli", "tui", "terminal"]
 categories = [
     "command-line-utilities",
     "text-editors",
-    "development-tools",
-    "config-management"
+    "development-tools"
 ]
 
 [dependencies]
