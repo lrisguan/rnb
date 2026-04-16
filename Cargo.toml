@@ -6,17 +6,7 @@ description = "A terminal-first Notebook editor and runner written in Rust"
 license = "GPL-2.0"
 repository = "https://github.com/lrisguan/rnb"
 readme = "README.md"
-keywords = [
-    "jupyter",
-    "notebook",
-    "ipynb",
-    "cli",
-    "terminal",
-    "editor",
-    "runner",
-    "tui",
-    "rust"
-]
+keywords = ["jupyter", "notebook", "cli", "tui", "terminal"]
 categories = [
     "command-line-utilities",
     "text-editors",
