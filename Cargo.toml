@@ -2,6 +2,27 @@
 name = "rnb"
 version = "0.0.1"
 edition = "2021"
+description = "A terminal-first Notebook editor and runner written in Rust"
+license = "GPLv2"
+repository = "https://github.com/lrisguan/rnb"
+readme = "README.md"
+keywords = [
+    "jupyter",
+    "notebook",
+    "ipynb",
+    "cli",
+    "terminal",
+    "editor",
+    "runner",
+    "tui",
+    "rust"
+]
+categories = [
+    "command-line-utilities",
+    "text-editors",
+    "development-tools",
+    "config-management"
+]
 
 [dependencies]
 anyhow = "1.0"
