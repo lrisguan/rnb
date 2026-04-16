@@ -1,12 +1,11 @@
 /// rnb
 /// Copyright (C) 2026 lrisguan <lrisguan@outlook.com>
-/// 
+///
 /// This program is released under the terms of the GNU General Public License version 2(GPLv2).
 /// See https://opensource.org/licenses/GPL-2.0 for more information.
-/// 
+///
 /// Project homepage: https://github.com/lrisguan/rnb
 /// Description: A terminal-first Notebook editor and runner written in Rust.
-
 mod app;
 mod editor;
 mod event;
@@ -19,7 +18,9 @@ use app::state::TargetPickerItem;
 use app::{Action, AppState, Mode};
 use base64::Engine;
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -89,6 +90,20 @@ enum OpenResource {
 enum OpenResourceKind {
     Link,
     Image,
+}
+
+fn page_step(total: usize) -> usize {
+    total.clamp(5, 12)
+}
+
+fn move_selection_page_up(selected: usize, total: usize) -> usize {
+    selected.saturating_sub(page_step(total))
+}
+
+fn move_selection_page_down(selected: usize, total: usize) -> usize {
+    selected
+        .saturating_add(page_step(total))
+        .min(total.saturating_sub(1))
 }
 
 fn parse_colorless_line(s: &[u8]) -> String {
@@ -538,47 +553,89 @@ impl TuiApp {
     }
 
     fn handle_kernel_selector_event(&mut self, event: Event) {
-        let Event::Key(key) = event else {
-            return;
-        };
+        match event {
+            Event::Mouse(mouse) => {
+                if self.state.kernel_items.is_empty() {
+                    return;
+                }
 
-        match key.code {
-            KeyCode::Esc => {
-                self.state.show_kernel_selector = false;
-                self.state.clear_status();
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.state.kernel_items.is_empty() {
-                    return;
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.state.kernel_selected = if self.state.kernel_selected == 0 {
+                            self.state.kernel_items.len() - 1
+                        } else {
+                            self.state.kernel_selected - 1
+                        };
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.state.kernel_selected =
+                            (self.state.kernel_selected + 1) % self.state.kernel_items.len();
+                    }
+                    _ => {}
                 }
-                self.state.kernel_selected = if self.state.kernel_selected == 0 {
-                    self.state.kernel_items.len() - 1
-                } else {
-                    self.state.kernel_selected - 1
-                };
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.state.kernel_items.is_empty() {
-                    return;
-                }
-                self.state.kernel_selected =
-                    (self.state.kernel_selected + 1) % self.state.kernel_items.len();
-            }
-            KeyCode::Enter => {
-                if let Some(selected) = self.kernel_options.get(self.state.kernel_selected).cloned()
-                {
-                    self.kernel_client = KernelClient::with_python(&selected.python_path);
-                    self.active_python_path = selected.python_path.clone();
-                    self.state.notebook.metadata.kernelspec = Some(notebook::KernelSpec {
-                        name: selected.name,
-                        language: selected.language,
-                        display_name: selected.display_name.clone(),
-                    });
+            Event::Key(key) => match key.code {
+                KeyCode::Esc => {
                     self.state.show_kernel_selector = false;
-                    self.state
-                        .set_status(format!("Kernel switched: {}", selected.display_name));
+                    self.state.clear_status();
                 }
-            }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.state.kernel_items.is_empty() {
+                        return;
+                    }
+                    self.state.kernel_selected = if self.state.kernel_selected == 0 {
+                        self.state.kernel_items.len() - 1
+                    } else {
+                        self.state.kernel_selected - 1
+                    };
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if self.state.kernel_items.is_empty() {
+                        return;
+                    }
+                    self.state.kernel_selected =
+                        (self.state.kernel_selected + 1) % self.state.kernel_items.len();
+                }
+                KeyCode::PageUp | KeyCode::Char('b')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    if self.state.kernel_items.is_empty() {
+                        return;
+                    }
+                    self.state.kernel_selected = move_selection_page_up(
+                        self.state.kernel_selected,
+                        self.state.kernel_items.len(),
+                    );
+                }
+                KeyCode::PageDown | KeyCode::Char('f')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    if self.state.kernel_items.is_empty() {
+                        return;
+                    }
+                    self.state.kernel_selected = move_selection_page_down(
+                        self.state.kernel_selected,
+                        self.state.kernel_items.len(),
+                    );
+                }
+                KeyCode::Enter => {
+                    if let Some(selected) =
+                        self.kernel_options.get(self.state.kernel_selected).cloned()
+                    {
+                        self.kernel_client = KernelClient::with_python(&selected.python_path);
+                        self.active_python_path = selected.python_path.clone();
+                        self.state.notebook.metadata.kernelspec = Some(notebook::KernelSpec {
+                            name: selected.name,
+                            language: selected.language,
+                            display_name: selected.display_name.clone(),
+                        });
+                        self.state.show_kernel_selector = false;
+                        self.state
+                            .set_status(format!("Kernel switched: {}", selected.display_name));
+                    }
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -649,42 +706,84 @@ impl TuiApp {
     }
 
     fn handle_target_picker_event(&mut self, event: Event) {
-        let Event::Key(key) = event else {
-            return;
-        };
+        match event {
+            Event::Mouse(mouse) => {
+                if self.state.target_picker_items.is_empty() {
+                    return;
+                }
 
-        match key.code {
-            KeyCode::Esc => {
-                self.state.show_target_picker = false;
-                self.state.clear_status();
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.state.target_picker_items.is_empty() {
-                    return;
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.state.target_picker_selected =
+                            if self.state.target_picker_selected == 0 {
+                                self.state.target_picker_items.len() - 1
+                            } else {
+                                self.state.target_picker_selected - 1
+                            };
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.state.target_picker_selected = (self.state.target_picker_selected + 1)
+                            % self.state.target_picker_items.len();
+                    }
+                    _ => {}
                 }
-                self.state.target_picker_selected = if self.state.target_picker_selected == 0 {
-                    self.state.target_picker_items.len() - 1
-                } else {
-                    self.state.target_picker_selected - 1
-                };
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.state.target_picker_items.is_empty() {
-                    return;
-                }
-                self.state.target_picker_selected =
-                    (self.state.target_picker_selected + 1) % self.state.target_picker_items.len();
-            }
-            KeyCode::Enter => {
-                if let Some(resource) = self
-                    .open_picker_resources
-                    .get(self.state.target_picker_selected)
-                    .cloned()
-                {
-                    let _ = self.open_resource(&resource);
+            Event::Key(key) => match key.code {
+                KeyCode::Esc => {
                     self.state.show_target_picker = false;
+                    self.state.clear_status();
                 }
-            }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.state.target_picker_items.is_empty() {
+                        return;
+                    }
+                    self.state.target_picker_selected = if self.state.target_picker_selected == 0 {
+                        self.state.target_picker_items.len() - 1
+                    } else {
+                        self.state.target_picker_selected - 1
+                    };
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if self.state.target_picker_items.is_empty() {
+                        return;
+                    }
+                    self.state.target_picker_selected = (self.state.target_picker_selected + 1)
+                        % self.state.target_picker_items.len();
+                }
+                KeyCode::PageUp | KeyCode::Char('b')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    if self.state.target_picker_items.is_empty() {
+                        return;
+                    }
+                    self.state.target_picker_selected = move_selection_page_up(
+                        self.state.target_picker_selected,
+                        self.state.target_picker_items.len(),
+                    );
+                }
+                KeyCode::PageDown | KeyCode::Char('f')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    if self.state.target_picker_items.is_empty() {
+                        return;
+                    }
+                    self.state.target_picker_selected = move_selection_page_down(
+                        self.state.target_picker_selected,
+                        self.state.target_picker_items.len(),
+                    );
+                }
+                KeyCode::Enter => {
+                    if let Some(resource) = self
+                        .open_picker_resources
+                        .get(self.state.target_picker_selected)
+                        .cloned()
+                    {
+                        let _ = self.open_resource(&resource);
+                        self.state.show_target_picker = false;
+                    }
+                }
+                _ => {}
+            },
             _ => {}
         }
     }

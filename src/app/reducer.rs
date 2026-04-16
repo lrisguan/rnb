@@ -1,12 +1,11 @@
 /// rnb
 /// Copyright (C) 2026 lrisguan <lrisguan@outlook.com>
-/// 
+///
 /// This program is released under the terms of the GNU General Public License version 2(GPLv2).
 /// See https://opensource.org/licenses/GPL-2.0 for more information.
-/// 
+///
 /// Project homepage: https://github.com/lrisguan/rnb
 /// Description: A terminal-first Notebook editor and runner written in Rust.
-
 use crate::app::{Action, AppState};
 use crate::editor::Direction;
 use crate::notebook::{Cell, CodeCell, MarkdownCell};
@@ -266,14 +265,12 @@ fn cell_visual_rows(state: &AppState, idx: usize) -> usize {
 
             wrapped_line_height(&rendered, width).max(1) + 2
         }
-        Some(Cell::Markdown(markdown)) => {
-            let content_rows = wrapped_line_height(&markdown.source, width).max(1);
-            if is_current {
-                content_rows + 2
-            } else {
-                content_rows
-            }
-        }
+        Some(Cell::Markdown(markdown)) => crate::ui::render::markdown_cell_content_height(
+            &markdown.source,
+            width as u16,
+            is_current,
+            state.mode,
+        ),
         None => 1,
     };
 
@@ -304,7 +301,7 @@ fn clamp_scroll_offset(state: &mut AppState) {
     state.scroll_offset = state.scroll_offset.min(max_notebook_scroll_offset(state));
 }
 
-fn cell_index_for_scroll_offset(state: &AppState) -> Option<usize> {
+fn cell_index_for_document_row(state: &AppState, document_row: usize) -> Option<usize> {
     if state.notebook.is_empty() {
         return None;
     }
@@ -312,13 +309,18 @@ fn cell_index_for_scroll_offset(state: &AppState) -> Option<usize> {
     let mut row = 0usize;
     for idx in 0..state.notebook.len() {
         let cell_rows = cell_visual_rows(state, idx);
-        if state.scroll_offset < row.saturating_add(cell_rows) {
+        if document_row < row.saturating_add(cell_rows) {
             return Some(idx);
         }
         row = row.saturating_add(cell_rows);
     }
 
     Some(state.notebook.len().saturating_sub(1))
+}
+
+fn centered_document_row(state: &AppState) -> usize {
+    let center_offset = viewport_visible_rows(state) / 2;
+    state.scroll_offset.saturating_add(center_offset)
 }
 
 fn current_cell_text(state: &AppState) -> Option<String> {
@@ -919,7 +921,8 @@ pub fn reduce(state: &mut AppState, action: Action) {
             state.scroll_offset = state.scroll_offset.saturating_sub(step);
             clamp_scroll_offset(state);
             if !state.in_cell_mode {
-                if let Some(idx) = cell_index_for_scroll_offset(state) {
+                if let Some(idx) = cell_index_for_document_row(state, centered_document_row(state))
+                {
                     state.current_cell = idx;
                 }
             }
@@ -931,7 +934,8 @@ pub fn reduce(state: &mut AppState, action: Action) {
             state.scroll_offset = state.scroll_offset.saturating_add(step).min(max_scroll);
             clamp_scroll_offset(state);
             if !state.in_cell_mode {
-                if let Some(idx) = cell_index_for_scroll_offset(state) {
+                if let Some(idx) = cell_index_for_document_row(state, centered_document_row(state))
+                {
                     state.current_cell = idx;
                 }
             }

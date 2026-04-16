@@ -2,13 +2,12 @@
 
 /// rnb
 /// Copyright (C) 2026 lrisguan <lrisguan@outlook.com>
-/// 
+///
 /// This program is released under the terms of the GNU General Public License version 2(GPLv2).
 /// See https://opensource.org/licenses/GPL-2.0 for more information.
-/// 
+///
 /// Project homepage: https://github.com/lrisguan/rnb
 /// Description: A terminal-first Notebook editor and runner written in Rust.
-
 use crate::app::AppState;
 use crate::notebook::Cell;
 use crate::ui::components::{
@@ -79,18 +78,31 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     }
 
     if state.show_target_picker && !state.target_picker_items.is_empty() {
+        let visible_rows = layout.completion_popup.height.saturating_sub(2).max(1) as usize;
+        let (start, end, selected_local) = list_window(
+            state.target_picker_items.len(),
+            state.target_picker_selected,
+            visible_rows,
+        );
         let items: Vec<PopupItem> = state
             .target_picker_items
+            [start..end]
             .iter()
             .map(|item| PopupItem {
                 label: item.label.clone(),
                 detail: item.detail.clone(),
             })
             .collect();
+        let title = format!(
+            "{}  {}/{}",
+            state.target_picker_title,
+            state.target_picker_selected.saturating_add(1),
+            state.target_picker_items.len()
+        );
         let popup = build_completion_popup(
             &items,
-            state.target_picker_selected,
-            &state.target_picker_title,
+            selected_local,
+            &title,
         );
         frame.render_widget(Clear, layout.completion_popup);
         frame.render_widget(popup, layout.completion_popup);
@@ -126,12 +138,18 @@ fn render_kernel_selector_overlay(
         height: popup_height.min(area.height),
     };
 
-    let items: Vec<Line> = state
-        .kernel_items
+    let visible_rows = popup_area.height.saturating_sub(2).max(1) as usize;
+    let (start, end, selected_local) = list_window(
+        state.kernel_items.len(),
+        state.kernel_selected,
+        visible_rows,
+    );
+
+    let items: Vec<Line> = state.kernel_items[start..end]
         .iter()
         .enumerate()
         .map(|(i, item)| {
-            let is_selected = i == state.kernel_selected;
+            let is_selected = i == selected_local;
             let style = if is_selected {
                 Style::default()
                     .add_modifier(Modifier::REVERSED)
@@ -143,8 +161,11 @@ fn render_kernel_selector_overlay(
         })
         .collect();
 
-    let block = Block::default()
-        .title("Kernel Selector (Enter apply, Esc cancel)")
+    let block = Block::default().title(format!(
+        "Kernel Selector (Enter apply, Esc cancel)  {}/{}",
+        state.kernel_selected.saturating_add(1),
+        state.kernel_items.len()
+    ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
 
@@ -391,18 +412,27 @@ fn calculate_cell_height(
             wrapped_rendered_lines_height(&lines, max_width).max(1) + 2
         }
         Cell::Markdown(markdown_cell) => {
-            if is_current && mode == crate::app::Mode::Insert {
-                let md_source_text = build_markdown_source_prefixed_text(&markdown_cell.source);
-                wrapped_text_height(&md_source_text, max_width).max(1) + 2
-            } else {
-                let rendered = render_markdown_to_lines(&markdown_cell.source);
-                let content_height = wrapped_rendered_lines_height(&rendered, max_width).max(1);
-                if is_current {
-                    content_height + 2
-                } else {
-                    content_height
-                }
-            }
+            markdown_cell_content_height(&markdown_cell.source, max_width, is_current, mode)
+        }
+    }
+}
+
+pub(crate) fn markdown_cell_content_height(
+    source: &str,
+    max_width: u16,
+    is_current: bool,
+    mode: crate::app::Mode,
+) -> usize {
+    if is_current && mode == crate::app::Mode::Insert {
+        let md_source_text = build_markdown_source_prefixed_text(source);
+        wrapped_text_height(&md_source_text, max_width).max(1) + 2
+    } else {
+        let rendered = render_markdown_to_lines(source);
+        let content_height = wrapped_rendered_lines_height(&rendered, max_width).max(1);
+        if is_current {
+            content_height + 2
+        } else {
+            content_height
         }
     }
 }
@@ -1632,10 +1662,18 @@ struct MarkdownRenderer {
     lines: Vec<Line<'static>>,
     current_line: Vec<Span<'static>>,
     style_stack: Vec<MarkdownStyleKind>,
+    image_stack: Vec<MarkdownImageDraft>,
     quote_depth: usize,
     list_stack: Vec<ListContext>,
     code_block_depth: usize,
     table: Option<TableState>,
+}
+
+#[derive(Clone, Debug)]
+struct MarkdownImageDraft {
+    destination: String,
+    title: Option<String>,
+    label: String,
 }
 
 #[derive(Clone, Debug)]
@@ -1676,6 +1714,7 @@ impl MarkdownRenderer {
             lines: Vec::new(),
             current_line: Vec::new(),
             style_stack: Vec::new(),
+            image_stack: Vec::new(),
             quote_depth: 0,
             list_stack: Vec::new(),
             code_block_depth: 0,
@@ -1687,15 +1726,22 @@ impl MarkdownRenderer {
         match event {
             Event::Start(tag) => self.start_tag(tag),
             Event::End(tag) => self.end_tag(tag),
-            Event::Text(text) => self.push_text(text.as_ref()),
+            Event::Text(text) => {
+                self.note_active_image_label(text.as_ref());
+                self.push_text(text.as_ref());
+            }
             Event::Code(text) => {
+                self.note_active_image_label(text.as_ref());
                 self.push_styled_text(text.as_ref(), MarkdownStyleKind::InlineCode)
             }
             Event::InlineMath(text) => {
                 self.push_styled_text(text.as_ref(), MarkdownStyleKind::InlineMath)
             }
             Event::DisplayMath(text) => self.push_display_math(text.as_ref()),
-            Event::Html(html) | Event::InlineHtml(html) => self.push_html(html.as_ref()),
+            Event::Html(html) | Event::InlineHtml(html) => {
+                self.note_active_image_label(html.as_ref());
+                self.push_html(html.as_ref())
+            }
             Event::SoftBreak => self.soft_break(),
             Event::HardBreak => self.hard_break(),
             Event::Rule => self.render_rule(),
@@ -1773,7 +1819,21 @@ impl MarkdownRenderer {
             Tag::Emphasis => self.style_stack.push(MarkdownStyleKind::Emphasis),
             Tag::Strong => self.style_stack.push(MarkdownStyleKind::Strong),
             Tag::Strikethrough => self.style_stack.push(MarkdownStyleKind::Strikethrough),
-            Tag::Link { .. } | Tag::Image { .. } => self.style_stack.push(MarkdownStyleKind::Link),
+            Tag::Link { .. } => self.style_stack.push(MarkdownStyleKind::Link),
+            Tag::Image {
+                dest_url, title, ..
+            } => {
+                self.style_stack.push(MarkdownStyleKind::Link);
+                self.image_stack.push(MarkdownImageDraft {
+                    destination: dest_url.to_string(),
+                    title: if title.is_empty() {
+                        None
+                    } else {
+                        Some(title.to_string())
+                    },
+                    label: String::new(),
+                });
+            }
             Tag::MetadataBlock(_) => {}
             Tag::FootnoteDefinition(_) => {}
             Tag::DefinitionList | Tag::DefinitionListTitle | Tag::DefinitionListDefinition => {}
@@ -1842,7 +1902,13 @@ impl MarkdownRenderer {
             TagEnd::Emphasis => self.pop_style(MarkdownStyleKind::Emphasis),
             TagEnd::Strong => self.pop_style(MarkdownStyleKind::Strong),
             TagEnd::Strikethrough => self.pop_style(MarkdownStyleKind::Strikethrough),
-            TagEnd::Link | TagEnd::Image => self.pop_style(MarkdownStyleKind::Link),
+            TagEnd::Link => self.pop_style(MarkdownStyleKind::Link),
+            TagEnd::Image => {
+                self.pop_style(MarkdownStyleKind::Link);
+                if let Some(image) = self.image_stack.pop() {
+                    self.render_image_hint(image);
+                }
+            }
             TagEnd::MetadataBlock(_) => {}
             TagEnd::HtmlBlock => {}
             TagEnd::FootnoteDefinition => {}
@@ -2154,6 +2220,56 @@ impl MarkdownRenderer {
             }
         }
     }
+
+    fn note_active_image_label(&mut self, text: &str) {
+        if let Some(active) = self.image_stack.last_mut() {
+            active.label.push_str(text);
+        }
+    }
+
+    fn render_image_hint(&mut self, image: MarkdownImageDraft) {
+        let destination = image.destination.trim();
+        if destination.is_empty() {
+            return;
+        }
+
+        if image.label.trim().is_empty() {
+            let text = if let Some(title) = image.title.filter(|t| !t.trim().is_empty()) {
+                format!("[image: {}]({})", title.trim(), destination)
+            } else {
+                format!("[image]({})", destination)
+            };
+            self.push_spans_text(&text, self.style_for(MarkdownStyleKind::Link));
+            return;
+        }
+
+        let suffix = format!(" [img: {}]", shorten_inline_url(destination, 48));
+        self.push_spans_text(&suffix, Style::default().fg(Color::DarkGray));
+    }
+}
+
+fn shorten_inline_url(url: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let chars: Vec<char> = url.chars().collect();
+    if chars.len() <= max_chars {
+        return url.to_string();
+    }
+
+    if max_chars <= 3 {
+        return "...".chars().take(max_chars).collect();
+    }
+
+    let keep = max_chars - 3;
+    let head = keep / 2;
+    let tail = keep - head;
+    let mut out = String::new();
+    out.extend(chars.iter().take(head));
+    out.push_str("...");
+    out.extend(chars.iter().skip(chars.len().saturating_sub(tail)));
+    out
 }
 
 fn same_style_kind(a: MarkdownStyleKind, b: MarkdownStyleKind) -> bool {
@@ -2661,12 +2777,18 @@ fn output_to_prefixed_text(
 }
 
 fn render_completion_popup(frame: &mut Frame, state: &AppState, area: ratatui::layout::Rect) {
-    let items: Vec<Line> = state
-        .completion_items
+    let visible_rows = area.height.saturating_sub(2).max(1) as usize;
+    let (start, end, selected_local) = list_window(
+        state.completion_items.len(),
+        state.completion_selected,
+        visible_rows,
+    );
+
+    let items: Vec<Line> = state.completion_items[start..end]
         .iter()
         .enumerate()
         .map(|(i, item)| {
-            let is_selected = i == state.completion_selected;
+            let is_selected = i == selected_local;
             Line::from(Span::styled(
                 item.clone(),
                 if is_selected {
@@ -2682,6 +2804,11 @@ fn render_completion_popup(frame: &mut Frame, state: &AppState, area: ratatui::l
         .collect();
 
     let block = Block::default()
+        .title(format!(
+            "Completion {}/{}",
+            state.completion_selected.saturating_add(1),
+            state.completion_items.len()
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
 
@@ -2689,4 +2816,24 @@ fn render_completion_popup(frame: &mut Frame, state: &AppState, area: ratatui::l
 
     frame.render_widget(Clear, area);
     frame.render_widget(paragraph, area);
+}
+
+fn list_window(total: usize, selected: usize, visible_rows: usize) -> (usize, usize, usize) {
+    if total == 0 {
+        return (0, 0, 0);
+    }
+
+    let visible = visible_rows.max(1).min(total);
+    if total <= visible {
+        let safe_selected = selected.min(total.saturating_sub(1));
+        return (0, total, safe_selected);
+    }
+
+    let safe_selected = selected.min(total.saturating_sub(1));
+    let mut start = safe_selected.saturating_sub(visible / 2);
+    if start + visible > total {
+        start = total - visible;
+    }
+    let end = start + visible;
+    (start, end, safe_selected.saturating_sub(start))
 }
