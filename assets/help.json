@@ -1,0 +1,96 @@
+{
+    "items": [
+        {
+            "key": ":h",
+            "description": "show this help"
+        },
+        {
+            "key": "Esc",
+            "description": "close help"
+        },
+        {
+            "key": "Enter",
+            "description": "enter current cell (vim normal)"
+        },
+        {
+            "key": "Esc (in cell)",
+            "description": "leave cell back to cell mode"
+        },
+        {
+            "key": ":kernel",
+            "description": "open kernel selector"
+        },
+        {
+            "key": "Ctrl-r / r",
+            "description": "run current cell"
+        },
+        {
+            "key": "Ctrl-Enter / Shift-Enter",
+            "description": "run current cell"
+        },
+        {
+            "key": "A",
+            "description": "insert a new cell above the current cell"
+        },
+        {
+            "key": "B",
+            "description": "insert a new cell below the current cell"
+        },
+        {
+            "key": "i / I / a / A",
+            "description": "vim insert start/start-of-line/append/end-of-line"
+        },
+        {
+            "key": "Ctrl-R",
+            "description": "run all code cells"
+        },
+        {
+            "key": ":ra",
+            "description": "run all code cells"
+        },
+        {
+            "key": ":ro",
+            "description": "run current and above"
+        },
+        {
+            "key": ":rb",
+            "description": "run current and below"
+        },
+        {
+            "key": "Ctrl-j",
+            "description": "run current and below"
+        },
+        {
+            "key": "Ctrl-k",
+            "description": "run current and above"
+        },
+        {
+            "key": "Ctrl-s / :w",
+            "description": "save notebook"
+        },
+        {
+            "key": "Ctrl-b / Ctrl-f",
+            "description": "scroll up / down and focus the visible cell"
+        },
+        {
+            "key": ":open",
+            "description": "open notebook file (:open <path>)"
+        },
+        {
+            "key": ":ln",
+            "description": "open markdown links in system viewer"
+        },
+        {
+            "key": ":img",
+            "description": "open markdown or output images in system viewer"
+        },
+        {
+            "key": "i",
+            "description": "enter insert mode"
+        },
+        {
+            "key": ":",
+            "description": "enter command mode"
+        }
+    ]
+}
