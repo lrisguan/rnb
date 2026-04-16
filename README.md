@@ -49,19 +49,8 @@ execution workflow, and external resource opening for links and images.
 > ```
 
 ## 🚀 Quick start
-
-Run in development mode:
 ```bash
-cargo run 
-cargo run -- path/to/notebook.ipynb
-```
-Build release binary:
-```bash
-cargo build --release
-```
-Binary path:
-```bash
-target/release/rnb
+cargo install rnb
 ```
 ## CLI
 ```bash

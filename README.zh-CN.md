@@ -46,19 +46,8 @@ rnb
 > ```
 
 ## 🚀 快速开始
-
-开发模式运行：
 ```bash
-cargo run 
-cargo run -- path/to/notebook.ipynb
-```
-编译发布版二进制文件：
-```bash
-cargo build --release
-```
-二进制文件路径：
-```bash
-target/release/rnb
+cargo install rnb
 ```
 
 ## 命令行使用
