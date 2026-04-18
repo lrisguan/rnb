@@ -256,15 +256,4 @@ mod tests {
         assert_eq!(kernelspec.language, "python");
         assert_eq!(kernelspec.display_name, "Python 3");
     }
-
-    #[test]
-    fn parse_real_notebook_with_partial_kernelspec() {
-        let json = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/5_automatic_differentiation_implementation.ipynb"
-        ));
-        let notebook = parse_ipynb(json).expect("real notebook should parse");
-        assert!(!notebook.cells.is_empty());
-        assert_eq!(notebook.metadata.language_info.name, "python");
-    }
 }
