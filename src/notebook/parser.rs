@@ -183,13 +183,26 @@ fn parse_metadata(value: &serde_json::Value) -> Result<Metadata> {
     let kernelspec = value["kernelspec"]
         .as_object()
         .map(|ks| {
+            let name = ks
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("python3")
+                .to_string();
+            let language = ks
+                .get("language")
+                .and_then(|v| v.as_str())
+                .unwrap_or("python")
+                .to_string();
+            let display_name = ks
+                .get("display_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Python 3")
+                .to_string();
+
             Ok::<_, anyhow::Error>(super::model::KernelSpec {
-                name: ks["name"].as_str().unwrap_or("python3").to_string(),
-                language: ks["language"].as_str().unwrap_or("python").to_string(),
-                display_name: ks["display_name"]
-                    .as_str()
-                    .unwrap_or("Python 3")
-                    .to_string(),
+                name,
+                language,
+                display_name,
             })
         })
         .transpose()?;
@@ -206,4 +219,52 @@ fn parse_language_info(value: &serde_json::Value) -> Result<super::model::Langua
     Ok(super::model::LanguageInfo {
         name: value["name"].as_str().unwrap_or("python").to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_ipynb;
+
+    #[test]
+    fn parse_ipynb_with_partial_kernelspec_does_not_panic() {
+        let json = r#"{
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "source": ["hello"]
+                }
+            ],
+            "metadata": {
+                "kernelspec": {
+                    "name": "python3",
+                    "display_name": "Python 3"
+                },
+                "language_info": {
+                    "name": "python"
+                }
+            },
+            "nbformat": 4,
+            "nbformat_minor": 5
+        }"#;
+
+        let notebook = parse_ipynb(json).expect("parse should succeed");
+        let kernelspec = notebook
+            .metadata
+            .kernelspec
+            .expect("kernelspec should be present");
+        assert_eq!(kernelspec.name, "python3");
+        assert_eq!(kernelspec.language, "python");
+        assert_eq!(kernelspec.display_name, "Python 3");
+    }
+
+    #[test]
+    fn parse_real_notebook_with_partial_kernelspec() {
+        let json = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/5_automatic_differentiation_implementation.ipynb"
+        ));
+        let notebook = parse_ipynb(json).expect("real notebook should parse");
+        assert!(!notebook.cells.is_empty());
+        assert_eq!(notebook.metadata.language_info.name, "python");
+    }
 }
